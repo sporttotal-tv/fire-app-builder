@@ -24,7 +24,7 @@ public class Child {
     private String id;
     @SerializedName("start")
     @Expose
-    private Integer start;
+    private Long start;
     @SerializedName("teams")
     @Expose
     private List<Team> teams = null;
@@ -72,11 +72,11 @@ public class Child {
         this.id = id;
     }
 
-    public Integer getStart() {
+    public Long getStart() {
         return start;
     }
 
-    public void setStart(Integer start) {
+    public void setStart(Long start) {
         this.start = start;
     }
 
