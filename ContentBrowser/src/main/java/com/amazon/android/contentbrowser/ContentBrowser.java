@@ -14,12 +14,18 @@
  */
 package com.amazon.android.contentbrowser;
 
+import android.app.Activity;
+import android.content.Context;
+import android.content.Intent;
+import android.os.Bundle;
+import android.support.v17.leanback.widget.SparseArrayObjectAdapter;
+import android.util.Log;
+
 import com.amazon.android.contentbrowser.database.helpers.RecentDatabaseHelper;
 import com.amazon.android.contentbrowser.database.helpers.WatchlistDatabaseHelper;
 import com.amazon.android.contentbrowser.database.records.RecentRecord;
 import com.amazon.android.contentbrowser.helper.AnalyticsHelper;
 import com.amazon.android.contentbrowser.helper.AuthHelper;
-import com.amazon.android.contentbrowser.helper.ErrorHelper;
 import com.amazon.android.contentbrowser.helper.FontManager;
 import com.amazon.android.contentbrowser.helper.LauncherIntegrationManager;
 import com.amazon.android.contentbrowser.helper.PurchaseHelper;
@@ -42,35 +48,28 @@ import com.amazon.android.ui.fragments.AlertDialogFragment;
 import com.amazon.android.ui.fragments.LogoutSettingsFragment;
 import com.amazon.android.ui.fragments.NoticeSettingsFragment;
 import com.amazon.android.ui.fragments.SlideShowSettingFragment;
-import com.amazon.android.utils.ErrorUtils;
 import com.amazon.android.utils.LeanbackHelpers;
 import com.amazon.android.utils.Preferences;
+import com.amazon.dataloader.network.CMSService;
+import com.amazon.dataloader.network.Item;
+import com.amazon.dataloader.network.model.response.matchdetail.MatchResponse;
+import com.amazon.dataloader.network.model.response.videolist.Child;
+import com.amazon.dataloader.network.model.response.videolist.Component;
+import com.amazon.dataloader.network.model.response.videolist.VideoListResponse;
 import com.amazon.utils.DateAndTimeHelper;
 import com.amazon.utils.StringManipulation;
 
 import org.greenrobot.eventbus.EventBus;
 
-import android.app.Activity;
-import android.content.Context;
-import android.content.Intent;
-import android.os.Bundle;
-import android.support.v17.leanback.widget.SparseArrayObjectAdapter;
-import android.util.Log;
-
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Stack;
 
-import rx.Observable;
-import rx.Subscription;
-import rx.android.schedulers.AndroidSchedulers;
-import rx.schedulers.Schedulers;
+import retrofit2.Response;
 import rx.subscriptions.CompositeSubscription;
-
-import static com.amazon.android.contentbrowser.helper.LauncherIntegrationManager
-        .getSourceOfContentPlayRequest;
 
 /**
  * This class is the controller of the content browsing solution.
@@ -417,7 +416,7 @@ public class ContentBrowser implements IContentBrowser, ICancellableLoad {
      * Recommendation manager instance.
      */
     private RecommendationManager mRecommendationManager;
-    
+
     /**
      * Returns AuthHelper instance.
      *
@@ -460,7 +459,7 @@ public class ContentBrowser implements IContentBrowser, ICancellableLoad {
     public List<Content> getWatchlistContent() {
 
         List<Content> contentList = new ArrayList<>();
-        
+
         WatchlistDatabaseHelper databaseHelper = WatchlistDatabaseHelper.getInstance();
         if (databaseHelper != null) {
 
@@ -588,7 +587,7 @@ public class ContentBrowser implements IContentBrowser, ICancellableLoad {
         addSettingsAction(createTermsOfUseSettingsAction());
         //addSettingsAction(createSlideShowSettingAction());
         setupLogoutAction();
-        
+
         mSearchManager.addSearchAlgo(DEFAULT_SEARCH_ALGO_NAME, new ISearchAlgo<Content>() {
             @Override
             public boolean onCompare(String query, Content content) {
@@ -767,7 +766,7 @@ public class ContentBrowser implements IContentBrowser, ICancellableLoad {
         mRecommendationManager = new RecommendationManager(mAppContext);
         // First reading of the database upon app launch. Created off of main thread.
         mRecommendationManager.cleanDatabase();
-        
+
         // The app successfully loaded its modules so clear out the crash number.
         Preferences.setLong(ModularApplication.APP_CRASHES_KEY, 0);
 
@@ -1415,7 +1414,7 @@ public class ContentBrowser implements IContentBrowser, ICancellableLoad {
      * @return True if the watchlist contains the content; false otherwise.
      */
     private boolean isContentInWatchlist(String id) {
-        
+
         WatchlistDatabaseHelper databaseHelper = WatchlistDatabaseHelper.getInstance();
         if (databaseHelper != null) {
             return databaseHelper.recordExists(mAppContext, id);
@@ -1434,9 +1433,9 @@ public class ContentBrowser implements IContentBrowser, ICancellableLoad {
      */
     private void watchlistButtonClicked(String contentId, boolean addContent,
                                         SparseArrayObjectAdapter actionAdapter) {
-    
+
         WatchlistDatabaseHelper databaseHelper = WatchlistDatabaseHelper.getInstance();
-    
+
         if (databaseHelper != null) {
             if (addContent) {
                 databaseHelper.addRecord(mAppContext, contentId);
@@ -1995,160 +1994,62 @@ public class ContentBrowser implements IContentBrowser, ICancellableLoad {
     }
 
 
+    private List<com.amazon.dataloader.network.model.response.matchdetail.Component> components = new ArrayList<>();
     /**
      * Run global recipes.
      */
     public void runGlobalRecipes(Activity activity, ICancellableLoad cancellable) {
 
-        final ContentContainer root = new ContentContainer("Root");
-        Subscription subscription =
-                Observable.range(0, mNavigator.getNavigatorModel().getGlobalRecipes().size())
-                          // Do this first to make sure were running in new thread right a way.
-                          .subscribeOn(Schedulers.newThread())
-                          .concatMap(index -> mContentLoader.runGlobalRecipeAtIndex(index, root))
-                          .onBackpressureBuffer() // This must be right after concatMap.
-                          .doOnNext(o -> {
-                              if (DEBUG_RECIPE_CHAIN) {
-                                  Log.d(TAG, "doOnNext");
-                              }
-                          })
-                          // This should be last so the rest is running on a separate thread.
-                          .observeOn(AndroidSchedulers.mainThread())
-                          .subscribe(objectPair -> {
-                              if (DEBUG_RECIPE_CHAIN) {
-                                  Log.d(TAG, "subscriber onNext called");
-                              }
-                          }, throwable -> {
-                              Log.e(TAG, "Recipe chain failed:", throwable);
-                              ErrorHelper.injectErrorFragment(
-                                      mNavigator.getActiveActivity(),
-                                      ErrorUtils.ERROR_CATEGORY.FEED_ERROR,
-                                      (errorDialogFragment, errorButtonType,
-                                       errorCategory) -> {
-                                          if (errorButtonType ==
-                                                  ErrorUtils.ERROR_BUTTON_TYPE.EXIT_APP) {
-                                              mNavigator.getActiveActivity().finishAffinity();
-                                          }
-                                      });
-
-                          }, () -> {
-
-                              Log.v(TAG, "Recipe chain completed");
-                              // Remove empty sub containers.
-                              root.removeEmptySubContainers();
-
-                              mContentLoader.setRootContentContainer(root);
-                              if (mIRootContentContainerListener != null) {
-                                  mIRootContentContainerListener.onRootContentContainerPopulated
-                                          (mContentLoader.getRootContentContainer());
-                              }
-                              mContentLoader.setContentReloadRequired(false);
-                              mContentLoader.setContentLoaded(true);
-                              if (cancellable != null && cancellable.isLoadingCancelled()) {
-                                  Log.d(TAG, "Content load complete but app has been cancelled, " +
-                                          "returning from here");
-                                  return;
-                              }
-                              if (mLauncherIntegrationManager != null && activity != null &&
-                                      LauncherIntegrationManager
-                                              .isCallFromLauncher(activity.getIntent())) {
-
-                                  Log.d(TAG, "Call from launcher with intent " +
-                                          activity.getIntent());
-                                  String contentId = null;
-                                  try {
-
-                                      contentId = LauncherIntegrationManager
-                                              .getContentIdToPlay(mAppContext,
-                                                                  activity.getIntent());
-
-                                      Content content =
-                                              getRootContentContainer().findContentById(contentId);
-                                      if (content == null) {
-                                          mRecommendationManager.dismissRecommendation(contentId);
-                                          throw new IllegalArgumentException("No content exist " +
-                                                                                     "for " +
-                                                                                     "contentId "
-                                                                                     + contentId);
-                                      }
-                                      AnalyticsHelper.trackLauncherRequest(contentId, content,
-                                                                           getSourceOfContentPlayRequest(activity.getIntent()));
-                                      Intent intent = new Intent();
-                                      intent.putExtra(Content.class.getSimpleName(), content);
-                                      intent.putExtra(REQUEST_FROM_LAUNCHER, true);
-                                      intent.putExtra(PreferencesConstants.CONTENT_ID,
-                                                      content.getId());
-                                      switchToHomeScreen(intent);
-
-                                  }
-                                  catch (Exception e) {
-                                      Log.e(TAG, e.getLocalizedMessage(), e);
-                                      AnalyticsHelper.trackLauncherRequest(contentId, null,
-                                                                           getSourceOfContentPlayRequest(activity.getIntent()));
-                                      AlertDialogFragment.createAndShowAlertDialogFragment
-                                              (mNavigator.getActiveActivity(),
-                                               "Error",
-                                               "The selected content is no longer available",
-                                               null,
-                                               mAppContext.getString(R.string.ok),
-                                               new AlertDialogFragment.IAlertDialogListener() {
-
-                                                   @Override
-                                                   public void onDialogPositiveButton
-                                                           (AlertDialogFragment
-                                                                    alertDialogFragment) {
-
-                                                   }
-
-                                                   @Override
-                                                   public void onDialogNegativeButton
-                                                           (AlertDialogFragment
-                                                                    alertDialogFragment) {
-
-                                                       alertDialogFragment.dismiss();
-                                                       if (cancellable != null &&
-                                                               cancellable.isLoadingCancelled()) {
-                                                           Log.d(TAG, "switchToHomeScreen after " +
-                                                                   "launcher integration " +
-                                                                   "exception cancelled");
-                                                           return;
-                                                       }
-                                                       switchToHomeScreen();
-                                                   }
-                                               });
-                                  }
-                              }
-                              else {
-                                  if (cancellable != null &&
-                                          cancellable.isLoadingCancelled()) {
-                                      Log.d(TAG, "switchToHomeScreen after Splash cancelled");
-                                      return;
-                                  }
-
-                                  // Send recommendations if authentication is not required, or if
-                                  // the user is logged in.
-                                  if (!Navigator.isScreenAccessVerificationRequired(
-                                          mNavigator.getNavigatorModel()) ||
-                                          Preferences.getBoolean(
-                                                  LauncherIntegrationManager
-                                                          .PREFERENCE_KEY_USER_AUTHENTICATED)) {
-                                      mRecommendationManager.cleanDatabase();
-                                      mRecommendationManager
-                                              .updateGlobalRecommendations(mAppContext);
-                                  }
-                                  if (shouldRestoreLastActivity(activity)) {
-                                      Log.d(TAG, "Ran global recipes from app launch. Will " +
-                                              "add intent extra to resume previous activity");
-                                      switchToHomeScreen(activity.getIntent());
-                                  }
-                                  else {
-                                      switchToHomeScreen();
-                                  }
-                              }
-                          });
-
-        mCompositeSubscription.add(subscription);
+        try {
+            Response<VideoListResponse> videoListResponse = CMSService.getInstance().cmsApi.getLatestMatches().execute();
+            for (Component component: videoListResponse.body().getComponents()) {
+                if (component.getChildren() != null && component.getChildren().size() > 0 && component.getTitle().equals("Latest matches")) {
+                    for (Child  child: component.getChildren()) {
+                        Response<MatchResponse> matchResponse = CMSService.getInstance().cmsApi.getMatchDetail(child.getId()).execute();
+                        for (com.amazon.dataloader.network.model.response.matchdetail.Component component1: matchResponse.body().getComponents()) {
+                            if (component1.getType() != null && component1.getType().equals("match")) {
+                                components.add(component1);
+                            }
+                        }
+                    }
+                    setVideos();
+                    mContentLoader.setContentReloadRequired(false);
+                    mContentLoader.setContentLoaded(true);
+                    switchToHomeScreen();
+                }
+            }
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
     }
+
+    private void setVideos() {
+        ContentContainer rootContainer = new ContentContainer("Root");
+        ContentContainer contentContainer = new ContentContainer("Latest Matches");
+        contentContainer.setExtraValue("keyDataType", "Latest Matches");
+        addVideosToContainer(contentContainer, components);
+        rootContainer.addContentContainer(contentContainer);
+        mContentLoader.setRootContentContainer(rootContainer);
+        if (mIRootContentContainerListener != null) {
+            mIRootContentContainerListener.onRootContentContainerPopulated(mContentLoader.getRootContentContainer());
+        }
+    }
+
+    public void addVideosToContainer(ContentContainer contentContainer, List<com.amazon.dataloader.network.model.response.matchdetail.Component> items) {
+        for (com.amazon.dataloader.network.model.response.matchdetail.Component item: items) {
+            if (item.getVideo() != null && item.getVideo().getDefault().getHls() != null) {
+                Content content = new Content();
+                content.setBackgroundImageUrl(item.getImage().getThumb());
+                content.setCardImageUrl(item.getImage().getThumb());
+                content.setDescription(item.getTitle());
+                content.setId(item.getId());
+                content.setTitle(item.getTitle());
+                content.setUrl(item.getVideo().getDefault().getHls());
+                contentContainer.addContent(content);
+            }
+        }
+    }
+
 
     /**
      * Figures out if we should restore the last activity or not. If the app was opened in the last
